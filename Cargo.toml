@@ -1,0 +1,31 @@
+[package]
+name = "discord-audio-binder"
+version = "0.1.0"
+edition = "2024"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+# panic = "abort" 제거: worker 스레드(캡처/relay/tidal) 패닉이 앱 전체(라이브 방송)를 즉시
+# 종료시키던 문제(0xC0000409 fastfail) 방지. 패닉은 panic hook 이 crash.log 에 기록.
+
+# Windows 보안이 릴리스 빌드 보조 실행 파일을 오탐하지 않도록 호스트 도구만 디버그 정보 유지.
+[profile.release.build-override]
+debug = true
+debug-assertions = true
+overflow-checks = true
+
+[dependencies]
+# 기본(wgpu) 대신 glow(OpenGL) 렌더러 사용.
+# 게임(로아 등) 실행 시 디스플레이 모드/GPU 리셋이 일어나면 wgpu 는 텍스처 무효화에
+# Validation Error 로 '패닉'해 메인 스레드가 죽어 앱이 닫힌다. OpenGL 은 모드 변경에 강함.
+eframe = { version = "0.34.3", default-features = false, features = ["glow", "default_fonts"] }
+half = "2.7.1"
+raw-window-handle = "0.6"
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_Media", "Win32_Media_Audio", "Win32_System_Com", "Win32_System_Diagnostics_ToolHelp", "Win32_System_ProcessStatus", "Win32_Media_Audio_Endpoints", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Shell_PropertiesSystem", "Win32_Devices_FunctionDiscovery", "Graphics_Capture", "Graphics_DirectX", "Graphics_DirectX_Direct3D11", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_System_WinRT", "Win32_System_WinRT_Direct3D11", "Win32_System_WinRT_Graphics_Capture", "Win32_System_LibraryLoader", "Win32_Graphics_Direct3D_Fxc"] }
+windows-core = "0.62.2"
+wry = "0.55.1"
+
+[build-dependencies]
+winres = "0.1"
