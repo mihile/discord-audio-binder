@@ -510,12 +510,13 @@ fn right_panel(ui: &mut egui::Ui, app: &mut App) {
                             }
                         }
                     });
-                ui.horizontal(|ui| {
-                    if ui.button("장치 새로고침").clicked() {
-                        app.refresh_relay_devices();
-                    }
-                    hint(ui, "2중으로 들리면 VB-CABLE 같은 안 듣는 출력장치를 선택하세요.");
-                });
+                if ui.button("장치 새로고침").clicked() {
+                    app.refresh_relay_devices();
+                }
+                hint(
+                    ui,
+                    "2중으로 들리면 VB-CABLE 같은 안 듣는 출력장치를 선택하세요.",
+                );
                 if changed {
                     app.sync_game_audio_relay();
                     app.save_settings();
@@ -580,7 +581,15 @@ fn right_panel(ui: &mut egui::Ui, app: &mut App) {
             hint(ui, "TIDAL UI 와 무관하게 WebView2 오디오 볼륨을 조절합니다(Discord 로 나가는 소리에도 적용).");
             if app.tidal.is_none() {
                 ui.add_space(4.0);
-                ui.colored_label(Color32::from_rgb(0xED, 0x42, 0x45), "WebView2 런타임을 찾지 못했습니다. (Edge WebView2 Runtime 설치 필요)");
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(
+                            "WebView2 런타임을 찾지 못했습니다. (Edge WebView2 Runtime 설치 필요)",
+                        )
+                        .color(Color32::from_rgb(0xED, 0x42, 0x45)),
+                    )
+                    .wrap(),
+                );
             }
         });
 }
@@ -797,5 +806,5 @@ fn section(ui: &mut egui::Ui, title: &str) {
 }
 
 fn hint(ui: &mut egui::Ui, text: &str) {
-    ui.label(RichText::new(text).size(11.0).color(GREY));
+    ui.add(egui::Label::new(RichText::new(text).size(11.0).color(GREY)).wrap());
 }
