@@ -22,6 +22,7 @@ use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
+use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{
     GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
@@ -31,6 +32,7 @@ use windows::Win32::System::WinRT::Direct3D11::{
 };
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize};
+use windows::Win32::UI::Shell::{ITaskbarList, TaskbarList};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{Interface, PCSTR, s, w};
 
@@ -54,7 +56,7 @@ pub enum Cmd {
     SetCrop(bool),
     SetAspectCrop(bool),
     SetAspect { w: f32, h: f32 },
-    SetAspectAlign(i32),
+    SetAspectAlign { x: i32, y: i32 },
     SetHdr(bool),
     SetNits(f32),
     SetVsync(bool),
@@ -107,8 +109,8 @@ impl CaptureHandle {
     pub fn set_aspect(&self, w: f32, h: f32) {
         let _ = self.tx.send(Cmd::SetAspect { w, h });
     }
-    pub fn set_aspect_align(&self, align: i32) {
-        let _ = self.tx.send(Cmd::SetAspectAlign(align));
+    pub fn set_aspect_align(&self, x: i32, y: i32) {
+        let _ = self.tx.send(Cmd::SetAspectAlign { x, y });
     }
     pub fn set_hdr(&self, on: bool) {
         let _ = self.tx.send(Cmd::SetHdr(on));
@@ -146,7 +148,8 @@ struct State {
     aspect_crop: bool,
     aspect_w: f32,
     aspect_h: f32,
-    aspect_align: i32,
+    aspect_align_x: i32,
+    aspect_align_y: i32,
     crop_cache: Option<(i32, i32, i32, i32)>,
     crop_cache_fw: i32,
     crop_cache_fh: i32,
@@ -258,8 +261,9 @@ fn run(rx: Receiver<Cmd>, preview: Arc<Mutex<Preview>>) -> windows::core::Result
                     st.aspect_h = h.clamp(1.0, 64.0);
                     st.crop_cache = None;
                 }
-                Cmd::SetAspectAlign(align) => {
-                    st.aspect_align = align.clamp(0, 2);
+                Cmd::SetAspectAlign { x, y } => {
+                    st.aspect_align_x = x.clamp(0, 2);
+                    st.aspect_align_y = y.clamp(0, 2);
                     st.crop_cache = None;
                 }
                 Cmd::SetHdr(on) => {
@@ -413,7 +417,8 @@ impl State {
             aspect_crop: true,
             aspect_w: 16.0,
             aspect_h: 9.0,
-            aspect_align: 1,
+            aspect_align_x: 1,
+            aspect_align_y: 1,
             crop_cache: None,
             crop_cache_fw: 0,
             crop_cache_fh: 0,
@@ -578,7 +583,13 @@ impl State {
             (0, 0, fw, fh)
         };
         if self.aspect_crop {
-            rect = crop_to_aspect(rect, self.aspect_w, self.aspect_h, self.aspect_align);
+            rect = crop_to_aspect(
+                rect,
+                self.aspect_w,
+                self.aspect_h,
+                self.aspect_align_x,
+                self.aspect_align_y,
+            );
         }
         self.crop_cache = Some(rect);
         self.crop_cache_fw = fw;
@@ -927,11 +938,14 @@ impl State {
                 self.h,
                 SWP_SHOWWINDOW,
             );
+            remove_taskbar_button(self.hwnd);
         }
     }
 
     fn hide(&mut self) {
         unsafe {
+            // Discord가 공유 대상으로 찾을 수 있게 창은 visible 상태로 유지하되,
+            // 사용자가 보기 전에는 가상 화면 바깥으로 옮긴다.
             let vx = GetSystemMetrics(SM_CXVIRTUALSCREEN) + GetSystemMetrics(SM_XVIRTUALSCREEN);
             let _ = SetWindowPos(
                 self.hwnd,
@@ -942,6 +956,20 @@ impl State {
                 self.h,
                 SWP_NOZORDER | SWP_NOACTIVATE,
             );
+            remove_taskbar_button(self.hwnd);
+        }
+    }
+}
+
+/// 창은 Discord의 일반 창 열거에 남기고 작업표시줄 버튼만 제거한다.
+/// WS_EX_TOOLWINDOW는 Discord 열거에서도 제외될 수 있어 사용하지 않는다.
+unsafe fn remove_taskbar_button(hwnd: HWND) {
+    unsafe {
+        if let Ok(taskbar) =
+            CoCreateInstance::<_, ITaskbarList>(&TaskbarList, None, CLSCTX_INPROC_SERVER)
+        {
+            let _ = taskbar.HrInit();
+            let _ = taskbar.DeleteTab(hwnd);
         }
     }
 }
@@ -1195,7 +1223,8 @@ fn crop_to_aspect(
     rect: (i32, i32, i32, i32),
     aspect_w: f32,
     aspect_h: f32,
-    align: i32,
+    align_x: i32,
+    align_y: i32,
 ) -> (i32, i32, i32, i32) {
     let (mut x, mut y, mut w, mut h) = rect;
     if w <= 0 || h <= 0 || aspect_w <= 0.0 || aspect_h <= 0.0 {
@@ -1207,7 +1236,7 @@ fn crop_to_aspect(
     if current > target {
         let new_w = ((h as f64 * target).round() as i32).clamp(1, w);
         let dx = w - new_w;
-        x += match align.clamp(0, 2) {
+        x += match align_x.clamp(0, 2) {
             0 => 0,
             2 => dx,
             _ => dx / 2,
@@ -1215,8 +1244,34 @@ fn crop_to_aspect(
         w = new_w;
     } else if current < target {
         let new_h = ((w as f64 / target).round() as i32).clamp(1, h);
-        y += (h - new_h) / 2;
+        let dy = h - new_h;
+        y += match align_y.clamp(0, 2) {
+            0 => 0,
+            2 => dy,
+            _ => dy / 2,
+        };
         h = new_h;
     }
     (x, y, w, h)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::crop_to_aspect;
+
+    #[test]
+    fn horizontal_crop_uses_left_center_and_right_alignment() {
+        let rect = (0, 0, 200, 100);
+        assert_eq!(crop_to_aspect(rect, 1.0, 1.0, 0, 1), (0, 0, 100, 100));
+        assert_eq!(crop_to_aspect(rect, 1.0, 1.0, 1, 1), (50, 0, 100, 100));
+        assert_eq!(crop_to_aspect(rect, 1.0, 1.0, 2, 1), (100, 0, 100, 100));
+    }
+
+    #[test]
+    fn vertical_crop_uses_top_center_and_bottom_alignment() {
+        let rect = (0, 0, 100, 200);
+        assert_eq!(crop_to_aspect(rect, 1.0, 1.0, 1, 0), (0, 0, 100, 100));
+        assert_eq!(crop_to_aspect(rect, 1.0, 1.0, 1, 1), (0, 50, 100, 100));
+        assert_eq!(crop_to_aspect(rect, 1.0, 1.0, 1, 2), (0, 100, 100, 100));
+    }
 }

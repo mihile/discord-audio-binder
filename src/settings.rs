@@ -9,7 +9,8 @@ pub struct Settings {
     pub crop_16_9: bool,
     pub crop_aspect_w: f32,
     pub crop_aspect_h: f32,
-    pub crop_align: i32,
+    pub crop_align_x: i32,
+    pub crop_align_y: i32,
     pub vsync: bool,
     pub output_fps: f32,
     pub volume: f32,
@@ -27,7 +28,8 @@ impl Default for Settings {
             crop_16_9: true,
             crop_aspect_w: 16.0,
             crop_aspect_h: 9.0,
-            crop_align: 1,
+            crop_align_x: 1,
+            crop_align_y: 1,
             vsync: true,
             output_fps: 60.0,
             volume: 1.0,
@@ -76,8 +78,19 @@ impl Settings {
                             }
                         }
                         "crop_align" => {
+                            // 0.1.1 이하 설정 호환: 기존 값은 가로 정렬만 의미했다.
                             if let Ok(n) = v.parse::<i32>() {
-                                s.crop_align = n.clamp(0, 2);
+                                s.crop_align_x = n.clamp(0, 2);
+                            }
+                        }
+                        "crop_align_x" => {
+                            if let Ok(n) = v.parse::<i32>() {
+                                s.crop_align_x = n.clamp(0, 2);
+                            }
+                        }
+                        "crop_align_y" => {
+                            if let Ok(n) = v.parse::<i32>() {
+                                s.crop_align_y = n.clamp(0, 2);
                             }
                         }
                         "vsync" => s.vsync = v == "true",
@@ -107,14 +120,15 @@ impl Settings {
     pub fn save(&self) {
         if let Some(p) = Self::path() {
             let txt = format!(
-                "hdr_fix={}\nhdr_nits={}\ncrop={}\ncrop_16_9={}\ncrop_aspect_w={}\ncrop_aspect_h={}\ncrop_align={}\nvsync={}\noutput_fps={}\nvolume={}\ntidal_audio={}\ngame_audio={}\nrelay_device={}\n",
+                "hdr_fix={}\nhdr_nits={}\ncrop={}\ncrop_16_9={}\ncrop_aspect_w={}\ncrop_aspect_h={}\ncrop_align_x={}\ncrop_align_y={}\nvsync={}\noutput_fps={}\nvolume={}\ntidal_audio={}\ngame_audio={}\nrelay_device={}\n",
                 self.hdr_fix,
                 self.hdr_nits,
                 self.crop_titlebar,
                 self.crop_16_9,
                 self.crop_aspect_w,
                 self.crop_aspect_h,
-                self.crop_align,
+                self.crop_align_x,
+                self.crop_align_y,
                 self.vsync,
                 self.output_fps,
                 self.volume,

@@ -59,7 +59,8 @@ pub struct App {
     pub crop_16_9: bool,
     pub crop_aspect_w: f32,
     pub crop_aspect_h: f32,
-    pub crop_align: i32,
+    pub crop_align_x: i32,
+    pub crop_align_y: i32,
     pub vsync: bool,
     pub output_fps: f32,
     pub hdr_fix: bool,
@@ -87,7 +88,7 @@ impl App {
         capture_handle.set_crop(s.crop_titlebar);
         capture_handle.set_aspect_crop(s.crop_16_9);
         capture_handle.set_aspect(s.crop_aspect_w, s.crop_aspect_h);
-        capture_handle.set_aspect_align(s.crop_align);
+        capture_handle.set_aspect_align(s.crop_align_x, s.crop_align_y);
         capture_handle.set_vsync(s.vsync);
         capture_handle.set_output_fps(s.output_fps);
         capture_handle.set_hdr(s.hdr_fix);
@@ -117,7 +118,8 @@ impl App {
             crop_16_9: s.crop_16_9,
             crop_aspect_w: s.crop_aspect_w,
             crop_aspect_h: s.crop_aspect_h,
-            crop_align: s.crop_align,
+            crop_align_x: s.crop_align_x,
+            crop_align_y: s.crop_align_y,
             vsync: s.vsync,
             output_fps: s.output_fps,
             hdr_fix: s.hdr_fix,
@@ -137,7 +139,8 @@ impl App {
             crop_16_9: self.crop_16_9,
             crop_aspect_w: self.crop_aspect_w,
             crop_aspect_h: self.crop_aspect_h,
-            crop_align: self.crop_align,
+            crop_align_x: self.crop_align_x,
+            crop_align_y: self.crop_align_y,
             vsync: self.vsync,
             output_fps: self.output_fps,
             volume: self.tidal_volume,
@@ -259,194 +262,202 @@ fn left_panel(ui: &mut egui::Ui, app: &mut App) {
         .exact_size(340.0)
         .frame(panel_frame())
         .show_inside(ui, |ui| {
-            section(ui, "① 게임 창 선택");
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut app.filter)
-                        .hint_text("필터…")
-                        .desired_width(220.0),
-                );
-                if ui.button("새로고침").clicked() {
-                    app.refresh_windows();
-                }
-            });
-            ui.add_space(4.0);
-
-            let filter = app.filter.to_lowercase();
-            let windows = &app.windows;
-            let self_pid = app.self_pid;
-            let selected = app.selected_hwnd;
-            let mut clicked: Option<isize> = None;
-
             egui::ScrollArea::vertical()
-                .max_height(280.0)
+                .id_salt("left_panel_scroll")
+                .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    let mut any = false;
-                    for w in windows.iter().filter(|w| w.pid != self_pid).filter(|w| {
-                        filter.is_empty()
-                            || w.title.to_lowercase().contains(&filter)
-                            || w.process.to_lowercase().contains(&filter)
-                    }) {
-                        any = true;
-                        let label = format!("{}\n   {} · pid {}", w.title, w.process, w.pid);
-                        if ui
-                            .selectable_label(
-                                selected == Some(w.hwnd),
-                                RichText::new(label).size(12.5),
-                            )
-                            .clicked()
-                        {
-                            clicked = Some(w.hwnd);
+                    section(ui, "① 게임 창 선택");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut app.filter)
+                                .hint_text("필터…")
+                                .desired_width(220.0),
+                        );
+                        if ui.button("새로고침").clicked() {
+                            app.refresh_windows();
                         }
-                    }
-                    if !any {
-                        ui.colored_label(GREY, "창이 없습니다. 새로고침을 눌러보세요.");
-                    }
-                });
-            if let Some(h) = clicked {
-                app.selected_hwnd = Some(h);
-                app.sync_game_audio_relay();
-            }
+                    });
+                    ui.add_space(4.0);
 
-            ui.add_space(10.0);
-            section(ui, "② 미러링");
-            ui.horizontal(|ui| {
-                let start = ui.add_enabled(
-                    app.selected_hwnd.is_some(),
-                    egui::Button::new("▶ 미러링 시작").fill(ACCENT),
-                );
-                if start.clicked()
-                    && let Some(hwnd) = app.selected_hwnd
-                {
-                    app.capture.set_crop(app.crop_titlebar);
-                    app.capture.set_aspect_crop(app.crop_16_9);
-                    app.capture.set_aspect(app.crop_aspect_w, app.crop_aspect_h);
-                    app.capture.set_aspect_align(app.crop_align);
-                    app.capture.start(hwnd);
-                    app.sync_game_audio_relay();
-                    app.mirroring = true;
-                }
-                if ui.button("■ 중지").clicked() {
-                    app.capture.stop();
-                    app.mirroring = false;
-                }
-            });
-            ui.colored_label(
-                GREY,
-                RichText::new(
-                    "미러링 시작 시 'GameOutput' 출력 창이 캡처를 시작합니다(기본 숨김).",
-                )
-                .size(11.0),
-            );
+                    let filter = app.filter.to_lowercase();
+                    let windows = &app.windows;
+                    let self_pid = app.self_pid;
+                    let selected = app.selected_hwnd;
+                    let mut clicked: Option<isize> = None;
 
-            ui.add_space(6.0);
-            if ui
-                .checkbox(&mut app.crop_titlebar, "상단바(제목표시줄) 제외")
-                .changed()
-            {
-                app.capture.set_crop(app.crop_titlebar);
-                app.save_settings();
-            }
-            if ui
-                .checkbox(&mut app.crop_16_9, "비율 크롭")
-                .on_hover_text(
-                    "선택한 창의 캡처 영역을 지정한 비율로 잘라 GameOutput에 출력합니다.",
-                )
-                .changed()
-            {
-                app.capture.set_aspect_crop(app.crop_16_9);
-                app.save_settings();
-            }
-            ui.add_enabled_ui(app.crop_16_9, |ui| {
-                let mut changed = false;
-                ui.horizontal(|ui| {
-                    ui.label("크롭 비율");
-                    changed |= ui
-                        .add(
-                            egui::DragValue::new(&mut app.crop_aspect_w)
-                                .range(1.0..=64.0)
-                                .speed(0.25)
-                                .prefix("가로 "),
+                    egui::ScrollArea::vertical()
+                        .max_height(280.0)
+                        .show(ui, |ui| {
+                            let mut any = false;
+                            for w in windows.iter().filter(|w| w.pid != self_pid).filter(|w| {
+                                filter.is_empty()
+                                    || w.title.to_lowercase().contains(&filter)
+                                    || w.process.to_lowercase().contains(&filter)
+                            }) {
+                                any = true;
+                                let label =
+                                    format!("{}\n   {} · pid {}", w.title, w.process, w.pid);
+                                if ui
+                                    .selectable_label(
+                                        selected == Some(w.hwnd),
+                                        RichText::new(label).size(12.5),
+                                    )
+                                    .clicked()
+                                {
+                                    clicked = Some(w.hwnd);
+                                }
+                            }
+                            if !any {
+                                ui.colored_label(GREY, "창이 없습니다. 새로고침을 눌러보세요.");
+                            }
+                        });
+                    if let Some(h) = clicked {
+                        app.selected_hwnd = Some(h);
+                        app.sync_game_audio_relay();
+                    }
+
+                    ui.add_space(10.0);
+                    section(ui, "② 미러링");
+                    ui.horizontal(|ui| {
+                        let start = ui.add_enabled(
+                            app.selected_hwnd.is_some(),
+                            egui::Button::new("▶ 미러링 시작").fill(ACCENT),
+                        );
+                        if start.clicked()
+                            && let Some(hwnd) = app.selected_hwnd
+                        {
+                            app.capture.set_crop(app.crop_titlebar);
+                            app.capture.set_aspect_crop(app.crop_16_9);
+                            app.capture.set_aspect(app.crop_aspect_w, app.crop_aspect_h);
+                            app.capture
+                                .set_aspect_align(app.crop_align_x, app.crop_align_y);
+                            app.capture.start(hwnd);
+                            app.sync_game_audio_relay();
+                            app.mirroring = true;
+                        }
+                        if ui.button("■ 중지").clicked() {
+                            app.capture.stop();
+                            app.mirroring = false;
+                        }
+                    });
+                    ui.colored_label(
+                        GREY,
+                        RichText::new(
+                            "미러링 시작 시 'GameOutput' 출력 창이 캡처를 시작합니다(기본 숨김).",
                         )
-                        .changed();
-                    ui.label(":");
-                    changed |= ui
-                        .add(
-                            egui::DragValue::new(&mut app.crop_aspect_h)
-                                .range(1.0..=64.0)
-                                .speed(0.25)
-                                .prefix("세로 "),
-                        )
-                        .changed();
-                });
-                ui.horizontal(|ui| {
-                    ui.label("정렬");
-                    changed |= ui
-                        .selectable_value(&mut app.crop_align, 0, "왼쪽")
-                        .changed();
-                    changed |= ui
-                        .selectable_value(&mut app.crop_align, 1, "중앙")
-                        .changed();
-                    changed |= ui
-                        .selectable_value(&mut app.crop_align, 2, "우측")
-                        .changed();
-                });
-                if changed {
-                    app.crop_aspect_w = app.crop_aspect_w.clamp(1.0, 64.0);
-                    app.crop_aspect_h = app.crop_aspect_h.clamp(1.0, 64.0);
-                    app.crop_align = app.crop_align.clamp(0, 2);
-                    app.capture.set_aspect(app.crop_aspect_w, app.crop_aspect_h);
-                    app.capture.set_aspect_align(app.crop_align);
-                    app.save_settings();
-                }
-            });
-            if ui
-                .checkbox(&mut app.vsync, "출력 VSync")
-                .on_hover_text("끊겨 보이면 꺼서 출력 창 Present 대기를 줄여보세요.")
-                .changed()
-            {
-                app.capture.set_vsync(app.vsync);
-                app.save_settings();
-            }
-            ui.horizontal(|ui| {
-                ui.label("출력 FPS");
-                let resp = ui.add(
-                    egui::Slider::new(&mut app.output_fps, 30.0..=180.0)
-                        .step_by(30.0)
-                        .suffix(" fps"),
-                );
-                if resp.changed() {
-                    app.capture.set_output_fps(app.output_fps);
-                    app.save_settings();
-                }
-            });
-            if ui
-                .checkbox(&mut app.hdr_fix, "HDR 보정 (하얗게 나올 때)")
-                .changed()
-            {
-                app.capture.set_hdr(app.hdr_fix);
-                app.save_settings();
-            }
-            ui.add_enabled_ui(app.hdr_fix, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("HDR 밝기");
+                        .size(11.0),
+                    );
+
+                    ui.add_space(6.0);
                     if ui
-                        .add(egui::Slider::new(&mut app.hdr_nits, 80.0..=480.0).suffix(" nit"))
+                        .checkbox(&mut app.crop_titlebar, "상단바(제목표시줄) 제외")
                         .changed()
                     {
-                        app.capture.set_nits(app.hdr_nits);
+                        app.capture.set_crop(app.crop_titlebar);
                         app.save_settings();
                     }
-                });
-            });
+                    if ui
+                        .checkbox(&mut app.crop_16_9, "비율 크롭")
+                        .on_hover_text(
+                            "선택한 창의 캡처 영역을 지정한 비율로 잘라 GameOutput에 출력합니다.",
+                        )
+                        .changed()
+                    {
+                        app.capture.set_aspect_crop(app.crop_16_9);
+                        app.save_settings();
+                    }
+                    ui.add_enabled_ui(app.crop_16_9, |ui| {
+                        let mut changed = false;
+                        ui.horizontal(|ui| {
+                            ui.label("크롭 비율");
+                            changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut app.crop_aspect_w)
+                                        .range(1.0..=64.0)
+                                        .speed(0.25)
+                                        .prefix("가로 "),
+                                )
+                                .changed();
+                            ui.label(":");
+                            changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut app.crop_aspect_h)
+                                        .range(1.0..=64.0)
+                                        .speed(0.25)
+                                        .prefix("세로 "),
+                                )
+                                .changed();
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("정렬");
+                            changed |= crop_alignment_pad(
+                                ui,
+                                &mut app.crop_align_x,
+                                &mut app.crop_align_y,
+                            );
+                        });
+                        if changed {
+                            app.crop_aspect_w = app.crop_aspect_w.clamp(1.0, 64.0);
+                            app.crop_aspect_h = app.crop_aspect_h.clamp(1.0, 64.0);
+                            app.crop_align_x = app.crop_align_x.clamp(0, 2);
+                            app.crop_align_y = app.crop_align_y.clamp(0, 2);
+                            app.capture.set_aspect(app.crop_aspect_w, app.crop_aspect_h);
+                            app.capture
+                                .set_aspect_align(app.crop_align_x, app.crop_align_y);
+                            app.save_settings();
+                        }
+                    });
+                    if ui
+                        .checkbox(&mut app.vsync, "출력 VSync")
+                        .on_hover_text("끊겨 보이면 꺼서 출력 창 Present 대기를 줄여보세요.")
+                        .changed()
+                    {
+                        app.capture.set_vsync(app.vsync);
+                        app.save_settings();
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("출력 FPS");
+                        let resp = ui.add(
+                            egui::Slider::new(&mut app.output_fps, 30.0..=180.0)
+                                .step_by(30.0)
+                                .suffix(" fps"),
+                        );
+                        if resp.changed() {
+                            app.capture.set_output_fps(app.output_fps);
+                            app.save_settings();
+                        }
+                    });
+                    if ui
+                        .checkbox(&mut app.hdr_fix, "HDR 보정 (하얗게 나올 때)")
+                        .changed()
+                    {
+                        app.capture.set_hdr(app.hdr_fix);
+                        app.save_settings();
+                    }
+                    ui.add_enabled_ui(app.hdr_fix, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("HDR 밝기");
+                            if ui
+                                .add(
+                                    egui::Slider::new(&mut app.hdr_nits, 80.0..=480.0)
+                                        .suffix(" nit"),
+                                )
+                                .changed()
+                            {
+                                app.capture.set_nits(app.hdr_nits);
+                                app.save_settings();
+                            }
+                        });
+                    });
 
-            ui.add_space(4.0);
-            let status = if app.mirroring {
-                RichText::new("● 미러링 중").color(GREEN)
-            } else {
-                RichText::new("○ 정지").color(GREY)
-            };
-            ui.label(status);
+                    ui.add_space(4.0);
+                    let status = if app.mirroring {
+                        RichText::new("● 미러링 중").color(GREEN)
+                    } else {
+                        RichText::new("○ 정지").color(GREY)
+                    };
+                    ui.label(status);
+                });
         });
 }
 
@@ -455,6 +466,10 @@ fn right_panel(ui: &mut egui::Ui, app: &mut App) {
         .exact_size(380.0)
         .frame(panel_frame())
         .show_inside(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("right_panel_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
             section(ui, "⑤ 공유용 출력 창 (게임 화면만)");
             ui.horizontal(|ui| {
                 if ui.checkbox(&mut app.show_output, "출력 창 화면에 보이기").changed() {
@@ -591,6 +606,7 @@ fn right_panel(ui: &mut egui::Ui, app: &mut App) {
                     .wrap(),
                 );
             }
+                });
         });
 }
 
@@ -666,17 +682,21 @@ fn center_panel(ui: &mut egui::Ui, app: &mut App) {
                     RichText::new(format!("· 최대 간격 {max_gap_ms:.1} ms")).size(12.0),
                 );
             });
+            // 창 높이가 낮을 때 미리보기가 아래의 오디오 목록을 밀어내지 않도록
+            // 현재 남은 높이에서 제목/목록 영역을 먼저 확보한다.
+            let preview_height = (ui.available_height() - 190.0).clamp(180.0, 540.0);
             egui::Frame::new()
                 .stroke(Stroke::new(2.0, ACCENT))
                 .fill(Color32::BLACK)
                 .inner_margin(2.0)
                 .show(ui, |ui| {
-                    ui.set_min_height(300.0);
+                    ui.set_height(preview_height);
                     if let Some(t) = &app.preview_tex {
                         let sz = t.size();
-                        let avail = ui.available_width().min(720.0);
-                        let aspect = sz[1] as f32 / sz[0].max(1) as f32;
-                        let size = egui::vec2(avail, avail * aspect);
+                        let source = egui::vec2(sz[0].max(1) as f32, sz[1].max(1) as f32);
+                        let max_size = egui::vec2(ui.available_width().min(720.0), preview_height);
+                        let scale = (max_size.x / source.x).min(max_size.y / source.y).min(1.0);
+                        let size = source * scale;
                         let sized = egui::load::SizedTexture::new(t.id(), size);
                         ui.centered_and_justified(|ui| ui.add(egui::Image::new(sized)));
                     } else {
@@ -738,6 +758,62 @@ fn center_panel(ui: &mut egui::Ui, app: &mut App) {
 }
 
 // ---------- 스타일 헬퍼 ----------
+fn crop_alignment_pad(ui: &mut egui::Ui, align_x: &mut i32, align_y: &mut i32) -> bool {
+    const DIRECTIONS: [[(&str, &str, i32, i32); 3]; 3] = [
+        [
+            ("↖", "왼쪽 위", 0, 0),
+            ("↑", "위", 1, 0),
+            ("↗", "오른쪽 위", 2, 0),
+        ],
+        [("←", "왼쪽", 0, 1), ("", "", 1, 1), ("→", "오른쪽", 2, 1)],
+        [
+            ("↙", "왼쪽 아래", 0, 2),
+            ("↓", "아래", 1, 2),
+            ("↘", "오른쪽 아래", 2, 2),
+        ],
+    ];
+
+    let mut changed = false;
+    egui::Grid::new("crop_alignment_pad")
+        .spacing(egui::vec2(3.0, 3.0))
+        .show(ui, |ui| {
+            for (row_index, row) in DIRECTIONS.iter().enumerate() {
+                for &(icon, label, x, y) in row {
+                    if icon.is_empty() {
+                        let color = if *align_x == 1 && *align_y == 1 {
+                            ACCENT
+                        } else {
+                            GREY
+                        };
+                        ui.add_sized(
+                            [30.0, 30.0],
+                            egui::Label::new(RichText::new("•").size(20.0).color(color)),
+                        )
+                        .on_hover_text("중앙 기준점");
+                    } else {
+                        let selected = *align_x == x && *align_y == y;
+                        let response = ui
+                            .add_sized(
+                                [30.0, 30.0],
+                                egui::Button::new(RichText::new(icon).size(17.0))
+                                    .selected(selected),
+                            )
+                            .on_hover_text(label);
+                        if response.clicked() {
+                            *align_x = x;
+                            *align_y = y;
+                            changed = true;
+                        }
+                    }
+                }
+                if row_index < DIRECTIONS.len() - 1 {
+                    ui.end_row();
+                }
+            }
+        });
+    changed
+}
+
 fn load_korean_font(ctx: &egui::Context) {
     // egui 기본 폰트엔 한글 글리프가 없어 ㅁㅁㅁ 로 나옴 → 맑은 고딕 로드.
     let candidates = [
