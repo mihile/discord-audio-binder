@@ -57,6 +57,7 @@ pub enum Cmd {
     SetAspectCrop(bool),
     SetAspect { w: f32, h: f32 },
     SetAspectAlign { x: i32, y: i32 },
+    SetManualCrop(Option<[f32; 4]>),
     SetHdr(bool),
     SetNits(f32),
     SetVsync(bool),
@@ -112,6 +113,9 @@ impl CaptureHandle {
     pub fn set_aspect_align(&self, x: i32, y: i32) {
         let _ = self.tx.send(Cmd::SetAspectAlign { x, y });
     }
+    pub fn set_manual_crop(&self, crop: Option<[f32; 4]>) {
+        let _ = self.tx.send(Cmd::SetManualCrop(crop));
+    }
     pub fn set_hdr(&self, on: bool) {
         let _ = self.tx.send(Cmd::SetHdr(on));
     }
@@ -150,6 +154,7 @@ struct State {
     aspect_h: f32,
     aspect_align_x: i32,
     aspect_align_y: i32,
+    manual_crop: Option<[f32; 4]>,
     crop_cache: Option<(i32, i32, i32, i32)>,
     crop_cache_fw: i32,
     crop_cache_fh: i32,
@@ -264,6 +269,10 @@ fn run(rx: Receiver<Cmd>, preview: Arc<Mutex<Preview>>) -> windows::core::Result
                 Cmd::SetAspectAlign { x, y } => {
                     st.aspect_align_x = x.clamp(0, 2);
                     st.aspect_align_y = y.clamp(0, 2);
+                    st.crop_cache = None;
+                }
+                Cmd::SetManualCrop(crop) => {
+                    st.manual_crop = crop;
                     st.crop_cache = None;
                 }
                 Cmd::SetHdr(on) => {
@@ -419,6 +428,7 @@ impl State {
             aspect_h: 9.0,
             aspect_align_x: 1,
             aspect_align_y: 1,
+            manual_crop: None,
             crop_cache: None,
             crop_cache_fw: 0,
             crop_cache_fh: 0,
@@ -562,7 +572,9 @@ impl State {
 
         // ── 미리보기: 저빈도 CPU 읽기(출력 fps 에 영향 안 줌) ──
         if self.last_preview.elapsed() >= Duration::from_millis(500) {
-            self.update_preview(&src, fw, fh, (cx, cy, cw, ch))?;
+            // 출력 크롭과 무관하게 항상 원본 전체를 전달한다. UI의 영역 선택도
+            // 이 전체 프레임 좌표를 기준으로 하므로 출력과 정확히 대응한다.
+            self.update_preview(&src, fw, fh)?;
             self.last_preview = Instant::now();
         }
         Ok(())
@@ -574,6 +586,14 @@ impl State {
             && self.crop_cache_fh == fh
             && now.duration_since(self.crop_cache_checked) < Duration::from_millis(500)
         {
+            return self.crop_cache;
+        }
+
+        if let Some(manual) = self.manual_crop {
+            self.crop_cache = manual_crop_to_pixels(manual, fw, fh);
+            self.crop_cache_fw = fw;
+            self.crop_cache_fh = fh;
+            self.crop_cache_checked = now;
             return self.crop_cache;
         }
 
@@ -762,32 +782,30 @@ impl State {
         Ok(())
     }
 
-    /// 미리보기용: staging 을 읽어 RGBA8 로 변환 후 공유 버퍼에 push (egui 표시용).
-    /// 프레임 전체가 아닌 '크롭 영역만' GPU→CPU 복사 (1440p HDR 기준 회당 수십 MB 절감).
+    /// 미리보기용: 원본 전체 프레임을 staging 에 복사하고 최대 960x540 RGBA8로
+    /// 샘플링해 공유 버퍼에 push한다. 출력용 크롭은 이 경로에 적용하지 않는다.
     fn update_preview(
         &mut self,
         src: &ID3D11Texture2D,
-        _fw: i32,
-        _fh: i32,
-        crop: (i32, i32, i32, i32),
+        fw: i32,
+        fh: i32,
     ) -> windows::core::Result<()> {
-        let (cx, cy, cw, ch) = crop;
-        self.ensure_pv_staging(cw, ch)?;
+        self.ensure_pv_staging(fw, fh)?;
         let cur = self.pv_cur;
         let prev = 1 - cur;
         let tex_cur = self.pv_tex[cur].clone().unwrap();
         // 이전 프레임(이미 GPU 복사 완료된) 텍스처를 매핑 → Map 이 GPU 를 기다리지 않음(stall 제거)
         let staging = self.pv_tex[prev].clone().unwrap();
         let src_box = D3D11_BOX {
-            left: cx as u32,
-            top: cy as u32,
+            left: 0,
+            top: 0,
             front: 0,
-            right: (cx + cw) as u32,
-            bottom: (cy + ch) as u32,
+            right: fw as u32,
+            bottom: fh as u32,
             back: 1,
         };
         unsafe {
-            // 크롭 영역만 비동기 복사 (staging 은 크롭 크기)
+            // 전체 원본을 비동기 복사한다. 출력 크롭은 별도 GPU 경로에서만 적용된다.
             self.context
                 .CopySubresourceRegion(&tex_cur, 0, 0, 0, 0, src, 0, Some(&src_box));
         }
@@ -796,7 +814,7 @@ impl State {
             self.context
                 .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
         }
-        let (pw, ph) = preview_dimensions(cw, ch);
+        let (pw, ph) = preview_dimensions(fw, fh);
         let need = pw * ph * 4;
         if self.pv_scratch.len() < need {
             self.pv_scratch.resize(need, 0);
@@ -806,18 +824,18 @@ impl State {
         let lut = self.lut;
         let scale = 80.0f32 / self.nits.max(1.0);
         let hdr = self.hdr;
-        let cwu = cw as usize;
-        let chu = ch as usize;
+        let fwu = fw as usize;
+        let fhu = fh as usize;
         // 진단용 미리보기만 최대 960x540으로 샘플링해 원본 출력 경로의 CPU 부담을 제한한다.
         self.pv_scratch[..need]
             .chunks_mut(pw * 4)
             .enumerate()
             .for_each(|(row, d)| {
-                let src_row = row * chu / ph;
+                let src_row = row * fhu / ph;
                 if hdr {
                     let srow = (base + src_row * rp) as *const u16;
                     for col in 0..pw {
-                        let src_col = col * cwu / pw;
+                        let src_col = col * fwu / pw;
                         let r = half::f16::from_bits(unsafe { *srow.add(src_col * 4) }).to_f32()
                             * scale;
                         let g = half::f16::from_bits(unsafe { *srow.add(src_col * 4 + 1) })
@@ -835,7 +853,7 @@ impl State {
                 } else {
                     let srow = (base + src_row * rp) as *const u8;
                     for col in 0..pw {
-                        let src_col = col * cwu / pw;
+                        let src_col = col * fwu / pw;
                         let s = unsafe { std::slice::from_raw_parts(srow.add(src_col * 4), 4) };
                         let o = col * 4;
                         d[o] = s[2]; // BGRA src → RGBA
@@ -929,14 +947,38 @@ impl State {
 
     fn show(&mut self) {
         unsafe {
+            let vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            let vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            let vw = GetSystemMetrics(SM_CXVIRTUALSCREEN).max(1);
+            let vh = GetSystemMetrics(SM_CYVIRTUALSCREEN).max(1);
+            let x = self
+                .saved_pos
+                .0
+                .clamp(vx, (vx + vw - self.w.max(1)).max(vx));
+            let y = self
+                .saved_pos
+                .1
+                .clamp(vy, (vy + vh - self.h.max(1)).max(vy));
+            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
             let _ = SetWindowPos(
                 self.hwnd,
-                Some(HWND_TOP),
-                self.saved_pos.0,
-                self.saved_pos.1,
+                Some(HWND_TOPMOST),
+                x,
+                y,
                 self.w,
                 self.h,
-                SWP_SHOWWINDOW,
+                SWP_SHOWWINDOW | SWP_NOACTIVATE,
+            );
+            // 한 번 화면 앞으로 올린 뒤 일반 창 순서로 되돌린다. 숨김 위치에서
+            // 복원할 때 다른 창 뒤에 남아 사용자가 못 보는 상황을 방지한다.
+            let _ = SetWindowPos(
+                self.hwnd,
+                Some(HWND_NOTOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE,
             );
             remove_taskbar_button(self.hwnd);
         }
@@ -944,14 +986,27 @@ impl State {
 
     fn hide(&mut self) {
         unsafe {
+            let vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            let vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            let vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+            let vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+            let mut rect = RECT::default();
+            if GetWindowRect(self.hwnd, &mut rect).is_ok()
+                && rect.right > vx
+                && rect.left < vx + vw
+                && rect.bottom > vy
+                && rect.top < vy + vh
+            {
+                self.saved_pos = (rect.left, rect.top);
+            }
             // Discord가 공유 대상으로 찾을 수 있게 창은 visible 상태로 유지하되,
             // 사용자가 보기 전에는 가상 화면 바깥으로 옮긴다.
-            let vx = GetSystemMetrics(SM_CXVIRTUALSCREEN) + GetSystemMetrics(SM_XVIRTUALSCREEN);
+            let right_edge = vx + vw;
             let _ = SetWindowPos(
                 self.hwnd,
                 None,
-                vx + 50,
-                50,
+                right_edge + 50,
+                vy + 50,
                 self.w,
                 self.h,
                 SWP_NOZORDER | SWP_NOACTIVATE,
@@ -1219,6 +1274,31 @@ fn crop_rect(target: isize, fw: i32, fh: i32) -> Option<(i32, i32, i32, i32)> {
     }
 }
 
+fn manual_crop_to_pixels(
+    [x, y, w, h]: [f32; 4],
+    frame_w: i32,
+    frame_h: i32,
+) -> Option<(i32, i32, i32, i32)> {
+    if frame_w <= 0
+        || frame_h <= 0
+        || ![x, y, w, h].iter().all(|value| value.is_finite())
+        || w <= 0.0
+        || h <= 0.0
+    {
+        return None;
+    }
+
+    let left = (x.clamp(0.0, 1.0) * frame_w as f32).round() as i32;
+    let top = (y.clamp(0.0, 1.0) * frame_h as f32).round() as i32;
+    let right = ((x + w).clamp(0.0, 1.0) * frame_w as f32).round() as i32;
+    let bottom = ((y + h).clamp(0.0, 1.0) * frame_h as f32).round() as i32;
+    let left = left.clamp(0, frame_w - 1);
+    let top = top.clamp(0, frame_h - 1);
+    let right = right.clamp(left + 1, frame_w);
+    let bottom = bottom.clamp(top + 1, frame_h);
+    Some((left, top, right - left, bottom - top))
+}
+
 fn crop_to_aspect(
     rect: (i32, i32, i32, i32),
     aspect_w: f32,
@@ -1257,7 +1337,24 @@ fn crop_to_aspect(
 
 #[cfg(test)]
 mod tests {
-    use super::crop_to_aspect;
+    use super::{crop_to_aspect, manual_crop_to_pixels};
+
+    #[test]
+    fn normalized_manual_crop_maps_to_frame_pixels() {
+        assert_eq!(
+            manual_crop_to_pixels([0.25, 0.10, 0.50, 0.80], 1920, 1080),
+            Some((480, 108, 960, 864))
+        );
+    }
+
+    #[test]
+    fn manual_crop_is_clamped_inside_the_frame() {
+        assert_eq!(
+            manual_crop_to_pixels([0.90, 0.90, 0.50, 0.50], 100, 100),
+            Some((90, 90, 10, 10))
+        );
+        assert_eq!(manual_crop_to_pixels([0.0, 0.0, 0.0, 1.0], 100, 100), None);
+    }
 
     #[test]
     fn horizontal_crop_uses_left_center_and_right_alignment() {

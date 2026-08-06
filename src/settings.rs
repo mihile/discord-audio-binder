@@ -11,6 +11,7 @@ pub struct Settings {
     pub crop_aspect_h: f32,
     pub crop_align_x: i32,
     pub crop_align_y: i32,
+    pub manual_crop: Option<[f32; 4]>,
     pub vsync: bool,
     pub output_fps: f32,
     pub volume: f32,
@@ -30,6 +31,7 @@ impl Default for Settings {
             crop_aspect_h: 9.0,
             crop_align_x: 1,
             crop_align_y: 1,
+            manual_crop: None,
             vsync: true,
             output_fps: 60.0,
             volume: 1.0,
@@ -93,6 +95,9 @@ impl Settings {
                                 s.crop_align_y = n.clamp(0, 2);
                             }
                         }
+                        "manual_crop" => {
+                            s.manual_crop = parse_manual_crop(v);
+                        }
                         "vsync" => s.vsync = v == "true",
                         "output_fps" => {
                             if let Ok(n) = v.parse::<f32>() {
@@ -119,8 +124,9 @@ impl Settings {
 
     pub fn save(&self) {
         if let Some(p) = Self::path() {
+            let manual_crop = format_manual_crop(self.manual_crop);
             let txt = format!(
-                "hdr_fix={}\nhdr_nits={}\ncrop={}\ncrop_16_9={}\ncrop_aspect_w={}\ncrop_aspect_h={}\ncrop_align_x={}\ncrop_align_y={}\nvsync={}\noutput_fps={}\nvolume={}\ntidal_audio={}\ngame_audio={}\nrelay_device={}\n",
+                "hdr_fix={}\nhdr_nits={}\ncrop={}\ncrop_16_9={}\ncrop_aspect_w={}\ncrop_aspect_h={}\ncrop_align_x={}\ncrop_align_y={}\nmanual_crop={}\nvsync={}\noutput_fps={}\nvolume={}\ntidal_audio={}\ngame_audio={}\nrelay_device={}\n",
                 self.hdr_fix,
                 self.hdr_nits,
                 self.crop_titlebar,
@@ -129,6 +135,7 @@ impl Settings {
                 self.crop_aspect_h,
                 self.crop_align_x,
                 self.crop_align_y,
+                manual_crop,
                 self.vsync,
                 self.output_fps,
                 self.volume,
@@ -138,5 +145,66 @@ impl Settings {
             );
             let _ = std::fs::write(p, txt);
         }
+    }
+}
+
+fn sanitize_manual_crop([x, y, w, h]: [f32; 4]) -> Option<[f32; 4]> {
+    if ![x, y, w, h].iter().all(|value| value.is_finite()) || w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    let x = x.clamp(0.0, 1.0);
+    let y = y.clamp(0.0, 1.0);
+    let w = w.clamp(0.0, 1.0 - x);
+    let h = h.clamp(0.0, 1.0 - y);
+    (w > 0.0 && h > 0.0).then_some([x, y, w, h])
+}
+
+fn parse_manual_crop(value: &str) -> Option<[f32; 4]> {
+    let mut parts = value.split(',');
+    let crop = [
+        parts.next()?.trim().parse().ok()?,
+        parts.next()?.trim().parse().ok()?,
+        parts.next()?.trim().parse().ok()?,
+        parts.next()?.trim().parse().ok()?,
+    ];
+    if parts.next().is_some() {
+        return None;
+    }
+    sanitize_manual_crop(crop)
+}
+
+fn format_manual_crop(crop: Option<[f32; 4]>) -> String {
+    crop.map(|[x, y, w, h]| format!("{x:.6},{y:.6},{w:.6},{h:.6}"))
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_manual_crop, parse_manual_crop, sanitize_manual_crop};
+
+    #[test]
+    fn manual_crop_setting_parses_and_clamps() {
+        assert_eq!(
+            parse_manual_crop("0.25,0.1,0.5,0.8"),
+            Some([0.25, 0.1, 0.5, 0.8])
+        );
+        assert_eq!(
+            sanitize_manual_crop([0.9, 0.9, 0.5, 0.5]),
+            Some([0.9, 0.9, 0.100000024, 0.100000024])
+        );
+    }
+
+    #[test]
+    fn malformed_manual_crop_setting_is_ignored() {
+        assert_eq!(parse_manual_crop(""), None);
+        assert_eq!(parse_manual_crop("0.1,bad,0.5,0.5"), None);
+        assert_eq!(parse_manual_crop("0.1,0.1,0.5,0.5,0.2"), None);
+    }
+
+    #[test]
+    fn manual_crop_setting_round_trips_through_saved_text() {
+        let crop = Some([0.123456, 0.234567, 0.5, 0.6]);
+        assert_eq!(parse_manual_crop(&format_manual_crop(crop)), crop);
+        assert_eq!(format_manual_crop(None), "");
     }
 }
