@@ -31,6 +31,29 @@ const ACCENT: Color32 = Color32::from_rgb(0x58, 0x65, 0xF2); // Discord blurple
 const GREEN: Color32 = Color32::from_rgb(0x57, 0xF2, 0x87);
 const GREY: Color32 = Color32::from_rgb(0x9A, 0xA0, 0xA6);
 const PANEL: Color32 = Color32::from_rgb(0x2B, 0x2D, 0x31);
+const MIN_CROP_SIZE: f32 = 0.005;
+
+#[derive(Clone, Copy)]
+struct CropResizeEdges {
+    left: bool,
+    right: bool,
+    top: bool,
+    bottom: bool,
+}
+
+#[derive(Clone, Copy)]
+enum CropDragMode {
+    New,
+    Move,
+    Resize(CropResizeEdges),
+}
+
+#[derive(Clone, Copy)]
+struct CropDragState {
+    mode: CropDragMode,
+    pointer_start: [f32; 2],
+    crop_start: Option<[f32; 4]>,
+}
 
 pub struct App {
     audio: Option<AudioMonitor>,
@@ -61,6 +84,11 @@ pub struct App {
     pub crop_aspect_h: f32,
     pub crop_align_x: i32,
     pub crop_align_y: i32,
+    pub manual_crop: Option<[f32; 4]>,
+    crop_selecting: bool,
+    crop_working: Option<[f32; 4]>,
+    crop_edit_original: Option<[f32; 4]>,
+    crop_drag_state: Option<CropDragState>,
     pub vsync: bool,
     pub output_fps: f32,
     pub hdr_fix: bool,
@@ -89,6 +117,7 @@ impl App {
         capture_handle.set_aspect_crop(s.crop_16_9);
         capture_handle.set_aspect(s.crop_aspect_w, s.crop_aspect_h);
         capture_handle.set_aspect_align(s.crop_align_x, s.crop_align_y);
+        capture_handle.set_manual_crop(s.manual_crop);
         capture_handle.set_vsync(s.vsync);
         capture_handle.set_output_fps(s.output_fps);
         capture_handle.set_hdr(s.hdr_fix);
@@ -120,6 +149,11 @@ impl App {
             crop_aspect_h: s.crop_aspect_h,
             crop_align_x: s.crop_align_x,
             crop_align_y: s.crop_align_y,
+            manual_crop: s.manual_crop,
+            crop_selecting: false,
+            crop_working: None,
+            crop_edit_original: None,
+            crop_drag_state: None,
             vsync: s.vsync,
             output_fps: s.output_fps,
             hdr_fix: s.hdr_fix,
@@ -141,6 +175,7 @@ impl App {
             crop_aspect_h: self.crop_aspect_h,
             crop_align_x: self.crop_align_x,
             crop_align_y: self.crop_align_y,
+            manual_crop: self.manual_crop,
             vsync: self.vsync,
             output_fps: self.output_fps,
             volume: self.tidal_volume,
@@ -331,11 +366,13 @@ fn left_panel(ui: &mut egui::Ui, app: &mut App) {
                             app.capture.set_aspect(app.crop_aspect_w, app.crop_aspect_h);
                             app.capture
                                 .set_aspect_align(app.crop_align_x, app.crop_align_y);
+                            app.capture.set_manual_crop(app.manual_crop);
                             app.capture.start(hwnd);
                             app.sync_game_audio_relay();
                             app.mirroring = true;
                         }
                         if ui.button("■ 중지").clicked() {
+                            cancel_crop_edit(app);
                             app.capture.stop();
                             app.mirroring = false;
                         }
@@ -349,24 +386,74 @@ fn left_panel(ui: &mut egui::Ui, app: &mut App) {
                     );
 
                     ui.add_space(6.0);
-                    if ui
-                        .checkbox(&mut app.crop_titlebar, "상단바(제목표시줄) 제외")
-                        .changed()
-                    {
-                        app.capture.set_crop(app.crop_titlebar);
-                        app.save_settings();
+                    ui.horizontal(|ui| {
+                        let select_text = if app.crop_selecting {
+                            "✓ 선택 완료"
+                        } else {
+                            "▣ 영역 선택"
+                        };
+                        let select = ui
+                            .add_enabled(
+                                app.mirroring && app.preview_tex.is_some(),
+                                egui::Button::new(select_text)
+                                    .fill(if app.crop_selecting { GREEN } else { ACCENT }),
+                            )
+                            .on_hover_text(if app.crop_selecting {
+                                "현재 영역 편집을 완료하고 저장합니다."
+                            } else {
+                                "미리보기에서 새 영역을 드래그하거나 기존 영역을 편집합니다."
+                            });
+                        if select.clicked() {
+                            if app.crop_selecting {
+                                finish_crop_edit(app);
+                            } else {
+                                begin_crop_edit(app);
+                            }
+                        }
+                        if (app.manual_crop.is_some() || app.crop_working.is_some())
+                            && ui.button("영역 초기화").clicked()
+                        {
+                            app.manual_crop = None;
+                            app.crop_selecting = false;
+                            app.crop_working = None;
+                            app.crop_edit_original = None;
+                            app.crop_drag_state = None;
+                            app.capture.set_manual_crop(None);
+                            app.save_settings();
+                        }
+                    });
+                    if app.crop_selecting {
+                        hint(ui, "영역 안쪽 드래그=이동 · 변/모서리 드래그=크기 조절 · 바깥 드래그=새 선택 · Esc=취소");
+                    } else if app.manual_crop.is_some() {
+                        hint(ui, "수동 영역 적용 중 · 아래 자동 크롭 설정은 보존되며 일시적으로 무시됩니다.");
+                    } else if !app.mirroring {
+                        hint(ui, "영역 선택은 미러링을 시작한 뒤 사용할 수 있습니다.");
                     }
-                    if ui
-                        .checkbox(&mut app.crop_16_9, "비율 크롭")
-                        .on_hover_text(
-                            "선택한 창의 캡처 영역을 지정한 비율로 잘라 GameOutput에 출력합니다.",
-                        )
-                        .changed()
-                    {
-                        app.capture.set_aspect_crop(app.crop_16_9);
-                        app.save_settings();
-                    }
-                    ui.add_enabled_ui(app.crop_16_9, |ui| {
+
+                    let automatic_crop_enabled = app
+                        .crop_working
+                        .or(app.manual_crop)
+                        .is_none();
+                    ui.add_enabled_ui(automatic_crop_enabled, |ui| {
+                        if ui
+                            .checkbox(&mut app.crop_titlebar, "상단바(제목표시줄) 제외")
+                            .changed()
+                        {
+                            app.capture.set_crop(app.crop_titlebar);
+                            app.save_settings();
+                        }
+                        if ui
+                            .checkbox(&mut app.crop_16_9, "비율 크롭")
+                            .on_hover_text(
+                                "선택한 창의 캡처 영역을 지정한 비율로 잘라 GameOutput에 출력합니다.",
+                            )
+                            .changed()
+                        {
+                            app.capture.set_aspect_crop(app.crop_16_9);
+                            app.save_settings();
+                        }
+                    });
+                    ui.add_enabled_ui(automatic_crop_enabled && app.crop_16_9, |ui| {
                         let mut changed = false;
                         ui.horizontal(|ui| {
                             ui.label("크롭 비율");
@@ -618,6 +705,9 @@ fn center_panel(ui: &mut egui::Ui, app: &mut App) {
                 .inner_margin(12.0),
         )
         .show_inside(ui, |ui| {
+            if app.crop_selecting && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+                cancel_crop_edit(app);
+            }
             let mut out_fps = 0.0f32;
             let mut wgc_fps = 0.0f32;
             let mut max_gap_ms = 0.0f32;
@@ -691,14 +781,29 @@ fn center_panel(ui: &mut egui::Ui, app: &mut App) {
                 .inner_margin(2.0)
                 .show(ui, |ui| {
                     ui.set_height(preview_height);
-                    if let Some(t) = &app.preview_tex {
+                    if let Some(t) = app.preview_tex.clone() {
                         let sz = t.size();
                         let source = egui::vec2(sz[0].max(1) as f32, sz[1].max(1) as f32);
                         let max_size = egui::vec2(ui.available_width().min(720.0), preview_height);
                         let scale = (max_size.x / source.x).min(max_size.y / source.y).min(1.0);
                         let size = source * scale;
-                        let sized = egui::load::SizedTexture::new(t.id(), size);
-                        ui.centered_and_justified(|ui| ui.add(egui::Image::new(sized)));
+                        let canvas_size = egui::vec2(ui.available_width(), preview_height);
+                        let (canvas_rect, _) =
+                            ui.allocate_exact_size(canvas_size, egui::Sense::hover());
+                        let image_rect = egui::Rect::from_center_size(canvas_rect.center(), size);
+                        ui.painter().image(
+                            t.id(),
+                            image_rect,
+                            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
+                        // 검은 캔버스가 아니라 실제 영상 픽셀 사각형만 입력을 받는다.
+                        let response = ui.interact(
+                            image_rect,
+                            ui.id().with("preview_crop_image"),
+                            egui::Sense::click_and_drag(),
+                        );
+                        handle_crop_selection(ui, app, response);
                     } else {
                         ui.centered_and_justified(|ui| {
                             ui.colored_label(
@@ -758,6 +863,280 @@ fn center_panel(ui: &mut egui::Ui, app: &mut App) {
 }
 
 // ---------- 스타일 헬퍼 ----------
+fn begin_crop_edit(app: &mut App) {
+    app.crop_selecting = true;
+    app.crop_edit_original = app.manual_crop;
+    app.crop_working = app.manual_crop;
+    app.crop_drag_state = None;
+}
+
+fn finish_crop_edit(app: &mut App) {
+    app.manual_crop = app.crop_working;
+    app.capture.set_manual_crop(app.manual_crop);
+    app.save_settings();
+    app.crop_selecting = false;
+    app.crop_working = None;
+    app.crop_edit_original = None;
+    app.crop_drag_state = None;
+}
+
+fn cancel_crop_edit(app: &mut App) {
+    if !app.crop_selecting {
+        return;
+    }
+    app.capture.set_manual_crop(app.crop_edit_original);
+    app.crop_selecting = false;
+    app.crop_working = None;
+    app.crop_edit_original = None;
+    app.crop_drag_state = None;
+}
+
+fn handle_crop_selection(ui: &mut egui::Ui, app: &mut App, response: egui::Response) {
+    let image_rect = response.rect;
+    let response = if app.crop_selecting {
+        let cursor = response
+            .hover_pos()
+            .map(|pointer| {
+                crop_edit_cursor(image_rect, app.crop_working.or(app.manual_crop), pointer)
+            })
+            .unwrap_or(egui::CursorIcon::Crosshair);
+        response.on_hover_cursor(cursor)
+    } else {
+        response
+    };
+
+    if app.crop_selecting {
+        if response.drag_started()
+            && let Some(pointer) = response.interact_pointer_pos()
+        {
+            let point = normalized_preview_point(image_rect, pointer);
+            let crop = app.crop_working.or(app.manual_crop);
+            app.crop_drag_state = Some(CropDragState {
+                mode: crop_drag_mode(image_rect, crop, pointer),
+                pointer_start: point,
+                crop_start: crop,
+            });
+        }
+        if response.dragged()
+            && let Some(pointer) = response.interact_pointer_pos()
+            && let Some(drag) = app.crop_drag_state
+        {
+            let point = normalized_preview_point(image_rect, pointer);
+            if let Some(crop) = update_crop_drag(drag, point) {
+                app.crop_working = Some(crop);
+                app.capture.set_manual_crop(Some(crop));
+            }
+        }
+        if response.drag_stopped() {
+            if let Some(pointer) = response.interact_pointer_pos()
+                && let Some(drag) = app.crop_drag_state
+            {
+                let point = normalized_preview_point(image_rect, pointer);
+                if let Some(crop) = update_crop_drag(drag, point) {
+                    app.crop_working = Some(crop);
+                    app.capture.set_manual_crop(Some(crop));
+                }
+            }
+            app.crop_drag_state = None;
+        }
+    }
+
+    if let Some(crop) = app.crop_working.or(app.manual_crop) {
+        paint_crop_overlay(ui, image_rect, crop, app.crop_selecting);
+    }
+}
+
+fn crop_drag_mode(image: egui::Rect, crop: Option<[f32; 4]>, pointer: egui::Pos2) -> CropDragMode {
+    let Some(crop) = crop else {
+        return CropDragMode::New;
+    };
+    let selected = crop_rect_on_image(image, crop);
+    let handle = 10.0;
+    if !selected.expand(handle).contains(pointer) {
+        return CropDragMode::New;
+    }
+
+    let mut left = (pointer.x - selected.left()).abs() <= handle;
+    let mut right = (pointer.x - selected.right()).abs() <= handle;
+    let mut top = (pointer.y - selected.top()).abs() <= handle;
+    let mut bottom = (pointer.y - selected.bottom()).abs() <= handle;
+    if left && right {
+        if (pointer.x - selected.left()).abs() <= (pointer.x - selected.right()).abs() {
+            right = false;
+        } else {
+            left = false;
+        }
+    }
+    if top && bottom {
+        if (pointer.y - selected.top()).abs() <= (pointer.y - selected.bottom()).abs() {
+            bottom = false;
+        } else {
+            top = false;
+        }
+    }
+    if left || right || top || bottom {
+        CropDragMode::Resize(CropResizeEdges {
+            left,
+            right,
+            top,
+            bottom,
+        })
+    } else if selected.contains(pointer) {
+        CropDragMode::Move
+    } else {
+        CropDragMode::New
+    }
+}
+
+fn crop_edit_cursor(
+    image: egui::Rect,
+    crop: Option<[f32; 4]>,
+    pointer: egui::Pos2,
+) -> egui::CursorIcon {
+    match crop_drag_mode(image, crop, pointer) {
+        CropDragMode::New => egui::CursorIcon::Crosshair,
+        CropDragMode::Move => egui::CursorIcon::Grab,
+        CropDragMode::Resize(edges) => match (edges.left, edges.right, edges.top, edges.bottom) {
+            (true, false, true, false) | (false, true, false, true) => egui::CursorIcon::ResizeNwSe,
+            (false, true, true, false) | (true, false, false, true) => egui::CursorIcon::ResizeNeSw,
+            (true, false, false, false) | (false, true, false, false) => {
+                egui::CursorIcon::ResizeHorizontal
+            }
+            _ => egui::CursorIcon::ResizeVertical,
+        },
+    }
+}
+
+fn update_crop_drag(drag: CropDragState, pointer: [f32; 2]) -> Option<[f32; 4]> {
+    match drag.mode {
+        CropDragMode::New => normalized_crop_from_points(drag.pointer_start, pointer),
+        CropDragMode::Move => {
+            let [x, y, w, h] = drag.crop_start?;
+            let dx = pointer[0] - drag.pointer_start[0];
+            let dy = pointer[1] - drag.pointer_start[1];
+            Some([
+                (x + dx).clamp(0.0, 1.0 - w),
+                (y + dy).clamp(0.0, 1.0 - h),
+                w,
+                h,
+            ])
+        }
+        CropDragMode::Resize(edges) => {
+            let [x, y, w, h] = drag.crop_start?;
+            let dx = pointer[0] - drag.pointer_start[0];
+            let dy = pointer[1] - drag.pointer_start[1];
+            let mut left = x;
+            let mut right = x + w;
+            let mut top = y;
+            let mut bottom = y + h;
+            if edges.left {
+                left = (x + dx).clamp(0.0, right - MIN_CROP_SIZE);
+            }
+            if edges.right {
+                right = (x + w + dx).clamp(left + MIN_CROP_SIZE, 1.0);
+            }
+            if edges.top {
+                top = (y + dy).clamp(0.0, bottom - MIN_CROP_SIZE);
+            }
+            if edges.bottom {
+                bottom = (y + h + dy).clamp(top + MIN_CROP_SIZE, 1.0);
+            }
+            Some([left, top, right - left, bottom - top])
+        }
+    }
+}
+
+fn normalized_preview_point(rect: egui::Rect, point: egui::Pos2) -> [f32; 2] {
+    [
+        ((point.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0),
+        ((point.y - rect.top()) / rect.height().max(1.0)).clamp(0.0, 1.0),
+    ]
+}
+
+fn normalized_crop_from_points(start: [f32; 2], end: [f32; 2]) -> Option<[f32; 4]> {
+    let left = start[0].min(end[0]).clamp(0.0, 1.0);
+    let top = start[1].min(end[1]).clamp(0.0, 1.0);
+    let right = start[0].max(end[0]).clamp(0.0, 1.0);
+    let bottom = start[1].max(end[1]).clamp(0.0, 1.0);
+    let width = right - left;
+    let height = bottom - top;
+    (width >= MIN_CROP_SIZE && height >= MIN_CROP_SIZE).then_some([left, top, width, height])
+}
+
+fn paint_crop_overlay(ui: &egui::Ui, image: egui::Rect, crop: [f32; 4], selecting: bool) {
+    let selected = crop_rect_on_image(image, crop);
+    let shade = Color32::from_black_alpha(70);
+    let painter = ui.painter();
+    painter.rect_filled(
+        egui::Rect::from_min_max(image.min, egui::pos2(image.right(), selected.top())),
+        0.0,
+        shade,
+    );
+    painter.rect_filled(
+        egui::Rect::from_min_max(egui::pos2(image.left(), selected.bottom()), image.max),
+        0.0,
+        shade,
+    );
+    painter.rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(image.left(), selected.top()),
+            egui::pos2(selected.left(), selected.bottom()),
+        ),
+        0.0,
+        shade,
+    );
+    painter.rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(selected.right(), selected.top()),
+            egui::pos2(image.right(), selected.bottom()),
+        ),
+        0.0,
+        shade,
+    );
+    painter.rect_stroke(
+        selected,
+        0.0,
+        Stroke::new(2.0, if selecting { GREEN } else { ACCENT }),
+        egui::StrokeKind::Inside,
+    );
+    if selecting {
+        let handle_size = egui::vec2(8.0, 8.0);
+        let points = [
+            selected.left_top(),
+            egui::pos2(selected.center().x, selected.top()),
+            selected.right_top(),
+            egui::pos2(selected.left(), selected.center().y),
+            egui::pos2(selected.right(), selected.center().y),
+            selected.left_bottom(),
+            egui::pos2(selected.center().x, selected.bottom()),
+            selected.right_bottom(),
+        ];
+        for point in points {
+            let handle = egui::Rect::from_center_size(point, handle_size);
+            painter.rect_filled(handle, 1.0, Color32::WHITE);
+            painter.rect_stroke(
+                handle,
+                1.0,
+                Stroke::new(1.0, GREEN),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+}
+
+fn crop_rect_on_image(image: egui::Rect, crop: [f32; 4]) -> egui::Rect {
+    egui::Rect::from_min_max(
+        egui::pos2(
+            image.left() + crop[0] * image.width(),
+            image.top() + crop[1] * image.height(),
+        ),
+        egui::pos2(
+            image.left() + (crop[0] + crop[2]) * image.width(),
+            image.top() + (crop[1] + crop[3]) * image.height(),
+        ),
+    )
+}
+
 fn crop_alignment_pad(ui: &mut egui::Ui, align_x: &mut i32, align_y: &mut i32) -> bool {
     const DIRECTIONS: [[(&str, &str, i32, i32); 3]; 3] = [
         [
@@ -883,4 +1262,68 @@ fn section(ui: &mut egui::Ui, title: &str) {
 
 fn hint(ui: &mut egui::Ui, text: &str) {
     ui.add(egui::Label::new(RichText::new(text).size(11.0).color(GREY)).wrap());
+}
+
+#[cfg(test)]
+mod tests {
+    use eframe::egui;
+
+    use super::{
+        CropDragMode, CropDragState, CropResizeEdges, normalized_crop_from_points,
+        normalized_preview_point, update_crop_drag,
+    };
+
+    #[test]
+    fn crop_selection_supports_dragging_in_any_direction() {
+        assert_eq!(
+            normalized_crop_from_points([0.8, 0.7], [0.2, 0.1]),
+            Some([0.2, 0.1, 0.6, 0.59999996])
+        );
+    }
+
+    #[test]
+    fn crop_selection_rejects_accidental_tiny_drags() {
+        assert_eq!(normalized_crop_from_points([0.5, 0.5], [0.501, 0.9]), None);
+    }
+
+    #[test]
+    fn preview_resize_does_not_change_normalized_pointer_position() {
+        let small = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(100.0, 100.0));
+        let large = egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(400.0, 200.0));
+        assert_eq!(
+            normalized_preview_point(small, egui::pos2(25.0, 40.0)),
+            normalized_preview_point(large, egui::pos2(200.0, 130.0))
+        );
+    }
+
+    #[test]
+    fn moving_crop_is_clamped_inside_source_bounds() {
+        let moved = update_crop_drag(
+            CropDragState {
+                mode: CropDragMode::Move,
+                pointer_start: [0.75, 0.75],
+                crop_start: Some([0.7, 0.7, 0.2, 0.2]),
+            },
+            [1.0, 1.0],
+        );
+        assert_eq!(moved, Some([0.8, 0.8, 0.2, 0.2]));
+    }
+
+    #[test]
+    fn resizing_crop_edges_is_clamped_inside_source_bounds() {
+        let resized = update_crop_drag(
+            CropDragState {
+                mode: CropDragMode::Resize(CropResizeEdges {
+                    left: true,
+                    right: false,
+                    top: true,
+                    bottom: false,
+                }),
+                pointer_start: [0.2, 0.2],
+                crop_start: Some([0.2, 0.2, 0.6, 0.6]),
+            },
+            [0.0, 0.0],
+        );
+        assert_eq!(resized, Some([0.0, 0.0, 0.8, 0.8]));
+    }
 }
